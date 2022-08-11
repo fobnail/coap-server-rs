@@ -1,14 +1,23 @@
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::hash::Hash;
-use std::pin::Pin;
-use std::sync::Arc;
+use alloc::boxed::Box;
+use alloc::fmt::Debug;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::hash::Hash;
+use core::pin::Pin;
+use hashbrown::HashMap;
+use rand::Rng;
 
 use coap_lite::{BlockHandler, CoapRequest, MessageClass, MessageType, Packet};
+#[cfg(feature = "embassy")]
+use embassy_util::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::mpmc::DynamicSender as UnboundedSender,
+    mutex::Mutex,
+};
 use futures::Stream;
 use log::{debug, warn};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
+#[cfg(feature = "tokio")]
+use tokio::sync::{mpsc::UnboundedSender, Mutex};
+#[cfg(feature = "tokio")]
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::app::app_builder::AppBuilder;
@@ -30,11 +39,17 @@ pub(crate) const DEFAULT_BLOCK_TRANSFER: bool = true;
 /// the primary goals of this implementation, but with the need to balance developer friendliness
 /// of the main API.
 pub struct AppHandler<Endpoint: Debug + Clone + Ord + Eq + Hash> {
+    #[cfg(feature = "tokio")]
     retransmission_manager: Arc<Mutex<RetransmissionManager<Endpoint>>>,
+    #[cfg(feature = "embassy")]
+    retransmission_manager: Arc<Mutex<CriticalSectionRawMutex, RetransmissionManager<Endpoint>>>,
 
     /// Special internal [`coap_lite::BlockHandler`] that we use only for formatting errors
     /// that might be larger than MTU.
+    #[cfg(feature = "tokio")]
     error_block_handler: Arc<Mutex<BlockHandler<Endpoint>>>,
+    #[cfg(feature = "embassy")]
+    error_block_handler: Arc<Mutex<CriticalSectionRawMutex, BlockHandler<Endpoint>>>,
 
     /// Full set of handlers registered for this app, grouped by path but searchable using inexact
     /// matching.  See [`PathMatcher`] for more.
@@ -59,25 +74,31 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static> PacketHandler<E
         packet: Packet,
         peer: Endpoint,
     ) -> Pin<Box<dyn Stream<Item = Packet> + Send + 'a>> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        //let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         // TODO: This spawn is technically unnecessary as we could implement a Stream ourselves
         // similar to how async-stream crate does it, but the boiler plate doesn't really seem
         // worth it for now.
-        tokio::spawn({
+        /*tokio::spawn({
             let cloned_self = self.clone();
             async move {
                 cloned_self.handle_packet(tx, packet, peer).await;
             }
         });
-        Box::pin(UnboundedReceiverStream::new(rx))
+        Box::pin(UnboundedReceiverStream::new(rx))*/
+        todo!()
     }
 }
 
 impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static> AppHandler<Endpoint> {
-    pub fn from_builder(builder: AppBuilder<Endpoint>, mtu: Option<u32>) -> Self {
+    pub fn from_builder<R: Rng + ?Sized>(
+        builder: AppBuilder<Endpoint>,
+        mtu: Option<u32>,
+        rng: &mut R,
+    ) -> Self {
         let retransmission_manager = Arc::new(Mutex::new(RetransmissionManager::new(
             TransmissionParameters::default(),
+            rng,
         )));
 
         let build_params = BuildParameters {
@@ -113,7 +134,7 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static> AppHandler<Endp
         }
     }
 
-    async fn handle_packet(&self, tx: UnboundedSender<Packet>, packet: Packet, peer: Endpoint) {
+    async fn handle_packet(&self, tx: UnboundedSender<'_, Packet>, packet: Packet, peer: Endpoint) {
         match packet.header.code {
             MessageClass::Request(_) => {
                 self.handle_get(tx, packet, peer).await;
@@ -137,7 +158,7 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static> AppHandler<Endp
                     MessageType::Confirmable => {
                         // A common way in CoAP to trigger a cheap "ping" to make sure
                         // the server is alive.
-                        tx.send(new_pong_message(&packet)).unwrap();
+                        tx.send(new_pong_message(&packet)).await;
                     }
                     MessageType::NonConfirmable => {
                         debug!("Ignoring Non-Confirmable Empty message from {peer:?}");
@@ -150,7 +171,7 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static> AppHandler<Endp
         }
     }
 
-    async fn handle_get(&self, tx: UnboundedSender<Packet>, packet: Packet, peer: Endpoint) {
+    async fn handle_get(&self, tx: UnboundedSender<'_, Packet>, packet: Packet, peer: Endpoint) {
         let mut request = CoapRequest::from_packet(packet, peer);
         if let Err(e) = self.try_handle_get(&tx, &mut request).await {
             if request.apply_from_error(e.into_handling_error()) {
@@ -160,14 +181,14 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static> AppHandler<Endp
                     .lock()
                     .await
                     .intercept_response(&mut request);
-                tx.send(request.response.unwrap().message).unwrap();
+                tx.send(request.response.unwrap().message).await;
             }
         }
     }
 
     async fn try_handle_get(
         &self,
-        tx: &UnboundedSender<Packet>,
+        tx: &UnboundedSender<'_, Packet>,
         request: &mut CoapRequest<Endpoint>,
     ) -> Result<(), CoapError> {
         let paths = request.get_path_as_vec().map_err(CoapError::bad_request)?;

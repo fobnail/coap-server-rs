@@ -1,24 +1,38 @@
-use std::fmt::Debug;
-use std::pin::Pin;
+use core::fmt::{self, Debug};
+use core::pin::Pin;
 
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use coap_lite::Packet;
+use embassy_executor::executor::raw::TaskPool;
+use embassy_executor::executor::{SendSpawner, Spawner};
+use embassy_util::Either;
+#[cfg(feature = "embassy")]
+use embassy_util::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    channel::mpmc::{DynamicReceiver, DynamicSender},
+};
 use futures::stream::Fuse;
-use futures::{SinkExt, StreamExt};
+use futures::{Future, SinkExt, StreamExt};
 use log::{error, trace, warn};
+use rand::RngCore;
+#[cfg(feature = "tokio")]
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::packet_handler::{IntoHandler, PacketHandler};
 use crate::transport::{FramedBinding, FramedItem, FramedReadError, Transport, TransportError};
 
 /// Primary server API to configure, bind, and ultimately run the CoAP server.
-pub struct CoapServer<Handler, Endpoint> {
+pub struct CoapServer<'a, Handler, Endpoint, Fut: Future<Output = ()> + 'static> {
     binding: Fuse<Pin<Box<dyn FramedBinding<Endpoint>>>>,
-    packet_relay_rx: Receiver<FramedItem<Endpoint>>,
-    packet_relay_tx: Sender<FramedItem<Endpoint>>,
+    packet_relay_rx: DynamicReceiver<'a, FramedItem<Endpoint>>,
+    packet_relay_tx: DynamicSender<'a, FramedItem<Endpoint>>,
     handler: Option<Handler>,
+    pool: TaskPool<Fut, 32>,
 }
 
-impl<Handler, Endpoint: Debug + Send + Clone + 'static> CoapServer<Handler, Endpoint>
+impl<'a, Handler, Endpoint: Debug + Send + Clone + 'static, Fut: Future<Output = ()> + 'static>
+    CoapServer<'a, Handler, Endpoint, Fut>
 where
     Handler: PacketHandler<Endpoint> + Send + 'static,
 {
@@ -26,14 +40,23 @@ where
     /// customers will wish to use [`crate::udp::UdpTransport`].
     pub async fn bind<T: Transport<Endpoint = Endpoint>>(
         transport: T,
-    ) -> Result<Self, TransportError> {
+    ) -> Result<CoapServer<'a, Handler, Endpoint, Fut>, TransportError> {
         let binding = transport.bind().await?;
-        let (packet_tx, packet_rx) = tokio::sync::mpsc::channel(32);
+        let channel = Box::new(embassy_util::channel::mpmc::Channel::<
+            CriticalSectionRawMutex,
+            _,
+            32,
+        >::new());
+        // FIXME: avoid memory leak
+        let channel = Box::leak(channel);
+        let packet_tx = channel.sender().into();
+        let packet_rx = channel.receiver().into();
         Ok(Self {
             binding: binding.fuse(),
             packet_relay_rx: packet_rx,
             packet_relay_tx: packet_tx,
             handler: None,
+            pool: TaskPool::new(),
         })
     }
 
@@ -44,18 +67,18 @@ where
     pub async fn serve(
         mut self,
         handler: impl IntoHandler<Handler, Endpoint>,
+        rng: Box<dyn RngCore>,
     ) -> Result<(), FatalServerError> {
         let mtu = self.binding.get_ref().mtu();
-        self.handler = Some(handler.into_handler(mtu));
+        self.handler = Some(handler.into_handler(mtu, rng));
 
+        let spawner = embassy_executor::executor::Spawner::for_current_executor().await;
         loop {
-            tokio::select! {
-                event = self.binding.select_next_some() => {
-                    self.handle_rx_event(event)?;
-                }
-                Some(item) = self.packet_relay_rx.recv() => {
-                    self.handle_packet_relay(item).await;
-                }
+            match embassy_util::select(self.binding.select_next_some(), self.packet_relay_rx.recv())
+                .await
+            {
+                Either::First(event) => self.handle_rx_event(event, spawner)?,
+                Either::Second(item) => self.handle_packet_relay(item).await,
             }
         }
     }
@@ -63,11 +86,12 @@ where
     fn handle_rx_event(
         &self,
         result: Result<FramedItem<Endpoint>, FramedReadError<Endpoint>>,
+        spawner: Spawner,
     ) -> Result<(), FatalServerError> {
         match result {
             Ok((packet, peer)) => {
                 trace!("Incoming packet from {peer:?}: {packet:?}");
-                self.do_handle_request(packet, peer)?
+                self.do_handle_request(packet, peer, spawner)?
             }
             Err((transport_err, peer)) => {
                 warn!("Error from {peer:?}: {transport_err}");
@@ -80,7 +104,12 @@ where
         Ok(())
     }
 
-    fn do_handle_request(&self, packet: Packet, peer: Endpoint) -> Result<(), FatalServerError> {
+    fn do_handle_request(
+        &self,
+        packet: Packet,
+        peer: Endpoint,
+        spawner: Spawner,
+    ) -> Result<(), FatalServerError> {
         let handler = self
             .handler
             .as_ref()
@@ -91,23 +120,21 @@ where
             packet,
             peer,
         );
-        tokio::spawn(reply_stream);
+        //spawner.must_spawn(reply_task(Box::pin(reply_stream)));
+        self.pool.spawn(move || reply_stream);
         Ok(())
     }
 
     async fn gen_and_send_responses(
         handler: Handler,
-        packet_tx: Sender<FramedItem<Endpoint>>,
+        packet_tx: DynamicSender<'_, FramedItem<Endpoint>>,
         packet: Packet,
         peer: Endpoint,
     ) {
         let mut stream = handler.handle(packet, peer.clone());
         while let Some(response) = stream.next().await {
             let cloned_peer = peer.clone();
-            packet_tx
-                .send((response, cloned_peer))
-                .await
-                .expect("packet_rx closed?");
+            packet_tx.send((response, cloned_peer)).await;
         }
     }
 
@@ -122,14 +149,27 @@ where
 
 /// Fatal error preventing the server from starting or continuing.  Typically the result of
 /// programmer error or misconfiguration.
-#[derive(thiserror::Error, Debug)]
+#[derive(Debug)]
 pub enum FatalServerError {
     /// Programmer error within this crate, file a bug!
-    #[error("internal error: {0}")]
     InternalError(String),
 
     /// Transport error that is not related to any individual peer but would prevent any future
     /// packet exchanges on the transport.  Must abort the server.
-    #[error("fatal transport error: {0}")]
-    Transport(#[from] TransportError),
+    Transport(TransportError),
+}
+
+impl fmt::Display for FatalServerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InternalError(err) => write!(f, "internal error: {}", err),
+            Self::Transport(err) => write!(f, "fatal transport error: {}", err),
+        }
+    }
+}
+
+impl From<TransportError> for FatalServerError {
+    fn from(err: TransportError) -> Self {
+        Self::Transport(err)
+    }
 }

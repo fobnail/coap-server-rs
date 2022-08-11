@@ -1,5 +1,9 @@
-use std::fmt::Debug;
-use std::hash::Hash;
+use core::fmt::Debug;
+use core::hash::Hash;
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use rand::RngCore;
 
 use crate::app::app_handler::AppHandler;
 use crate::app::ResourceBuilder;
@@ -95,7 +99,7 @@ impl<Endpoint: Ord + Clone> AppBuilder<Endpoint> {
 impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static>
     IntoHandler<AppHandler<Endpoint>, Endpoint> for AppBuilder<Endpoint>
 {
-    fn into_handler(self, mtu: Option<u32>) -> AppHandler<Endpoint> {
-        AppHandler::from_builder(self, mtu)
+    fn into_handler(self, mtu: Option<u32>, mut rng: Box<dyn RngCore>) -> AppHandler<Endpoint> {
+        AppHandler::from_builder(self, mtu, &mut *rng)
     }
 }
