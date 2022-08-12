@@ -71,7 +71,7 @@ impl<Endpoint: Eq + Hash + Clone + Send + 'static> ObserveHandler<Endpoint> {
     pub async fn maybe_process_registration<R: Rng>(
         &self,
         request_response_pair: &mut CoapRequest<Endpoint>,
-        mut rng: R,
+        rng: &mut R,
     ) -> Result<RegistrationEvent, CoapError> {
         let observe_flag_result = request_response_pair.get_observe_flag();
         if observe_flag_result.is_none() {

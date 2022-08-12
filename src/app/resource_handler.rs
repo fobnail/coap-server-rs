@@ -1,8 +1,10 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::hash::Hash;
 use hashbrown::HashMap;
+use rand::Rng;
 
 use coap_lite::{BlockHandler, CoapRequest, Packet};
 #[cfg(feature = "embassy")]
@@ -54,10 +56,11 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash> Clone for ResourceHandler<Endpoi
 }
 
 impl<Endpoint: Debug + Clone + Eq + Hash + Ord + Send + 'static> ResourceHandler<Endpoint> {
-    pub async fn handle(
+    pub async fn handle<R: Rng>(
         &self,
-        tx: &UnboundedSender<'_, Packet>,
+        out: &mut Vec<Packet>,
         wrapped_request: Request<Endpoint>,
+        rng: &mut R,
     ) -> Result<(), CoapError> {
         let method = *wrapped_request.original.get_method();
         let method_handler = self
@@ -68,7 +71,7 @@ impl<Endpoint: Debug + Clone + Eq + Hash + Ord + Send + 'static> ResourceHandler
         // Loop here so we can "park" to wait for notify_change calls from an Observers
         // instances.  For non-observe cases, this loop breaks after its first iteration.
         match method_handler {
-            Some(handler) => self.do_handle(handler, tx, wrapped_request).await,
+            Some(handler) => self.do_handle(handler, out, wrapped_request, rng).await,
             None => Err(CoapError::method_not_allowed()),
         }
     }
@@ -77,11 +80,12 @@ impl<Endpoint: Debug + Clone + Eq + Hash + Ord + Send + 'static> ResourceHandler
     // these parts are especially expensive as it contains the request/response payloads and this
     // can be avoided by rethinking the Request/Response type system a bit and divorcing ourselves
     // from CoapRequest/CoapResponse.
-    async fn do_handle(
+    async fn do_handle<R: Rng>(
         &self,
         handler: &Box<dyn RequestHandler<Endpoint> + Send + Sync>,
-        tx: &UnboundedSender<'_, Packet>,
+        out: &mut Vec<Packet>,
         wrapped_request: Request<Endpoint>,
+        rng: &mut R,
     ) -> Result<(), CoapError> {
         let mut initial_pair = wrapped_request.original.clone();
         if !self.maybe_handle_block_request(&mut initial_pair).await? {
@@ -95,10 +99,9 @@ impl<Endpoint: Debug + Clone + Eq + Hash + Ord + Send + 'static> ResourceHandler
             fut.await?
         }
         let registration = self
-            .maybe_handle_observe_registration(&mut initial_pair)
+            .maybe_handle_observe_registration(&mut initial_pair, rng)
             .await?;
-        tx.send(initial_pair.response.as_ref().unwrap().message.clone())
-            .await;
+        out.push(initial_pair.response.as_ref().unwrap().message.clone());
 
         if let RegistrationEvent::Registered(mut receiver) = registration {
             debug!("Observe initiated by {:?}", initial_pair.source);
@@ -202,19 +205,19 @@ impl<Endpoint: Debug + Clone + Eq + Hash + Ord + Send + 'static> ResourceHandler
         }
     }
 
-    async fn maybe_handle_observe_registration(
+    async fn maybe_handle_observe_registration<R: Rng>(
         &self,
         request: &mut CoapRequest<Endpoint>,
+        rng: &mut R,
     ) -> Result<RegistrationEvent, CoapError> {
-        /*if let Some(observe_handler) = &self.observe_handler {
+        if let Some(observe_handler) = &self.observe_handler {
             observe_handler
                 .lock()
                 .await
-                .maybe_process_registration(request)
+                .maybe_process_registration(request, rng)
                 .await
         } else {
             Ok(RegistrationEvent::NoChange)
-        }*/
-        todo!()
+        }
     }
 }

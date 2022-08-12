@@ -55,7 +55,7 @@ enum ReplyEvent {
 }
 
 impl<Endpoint: Debug + Clone + Eq + Hash> RetransmissionManager<Endpoint> {
-    pub fn new<R: Rng + ?Sized>(parameters: TransmissionParameters, rng: &mut R) -> Self {
+    pub fn new<R: Rng>(parameters: TransmissionParameters, rng: &mut R) -> Self {
         let next_message_id = rng.gen();
         Self {
             next_message_id,
@@ -176,7 +176,7 @@ impl<Endpoint: Debug> SendReliably<'_, Endpoint> {
         self.packet.header.message_id
     }
 
-    pub async fn into_future<R: Rng>(self, mut rng: R) -> Result<(), SendFailed> {
+    /*pub async fn into_future<R: Rng>(self, mut rng: R) -> Result<(), SendFailed> {
         let mut next_timeout = rng.gen_range(self.parameters.ack_timeout_range());
         for attempt in 0..=self.parameters.max_retransmit {
             if attempt > 0 {
@@ -214,7 +214,7 @@ impl<Endpoint: Debug> SendReliably<'_, Endpoint> {
             todo!()
         }
         Err(SendFailed::NoReply(self.parameters.max_retransmit + 1))
-    }
+    }*/
 }
 
 #[derive(Debug)]

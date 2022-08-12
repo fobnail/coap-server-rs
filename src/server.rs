@@ -15,7 +15,7 @@ use embassy_util::{
 use futures::stream::Fuse;
 use futures::{Future, SinkExt, StreamExt};
 use log::{error, trace, warn};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 #[cfg(feature = "tokio")]
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -23,16 +23,14 @@ use crate::packet_handler::{IntoHandler, PacketHandler};
 use crate::transport::{FramedBinding, FramedItem, FramedReadError, Transport, TransportError};
 
 /// Primary server API to configure, bind, and ultimately run the CoAP server.
-pub struct CoapServer<'a, Handler, Endpoint, Fut: Future<Output = ()> + 'static> {
+pub struct CoapServer<'a, Handler, Endpoint> {
     binding: Fuse<Pin<Box<dyn FramedBinding<Endpoint>>>>,
     packet_relay_rx: DynamicReceiver<'a, FramedItem<Endpoint>>,
     packet_relay_tx: DynamicSender<'a, FramedItem<Endpoint>>,
     handler: Option<Handler>,
-    pool: TaskPool<Fut, 32>,
 }
 
-impl<'a, Handler, Endpoint: Debug + Send + Clone + 'static, Fut: Future<Output = ()> + 'static>
-    CoapServer<'a, Handler, Endpoint, Fut>
+impl<'a, Handler, Endpoint: Debug + Send + Clone + 'static> CoapServer<'a, Handler, Endpoint>
 where
     Handler: PacketHandler<Endpoint> + Send + 'static,
 {
@@ -40,7 +38,7 @@ where
     /// customers will wish to use [`crate::udp::UdpTransport`].
     pub async fn bind<T: Transport<Endpoint = Endpoint>>(
         transport: T,
-    ) -> Result<CoapServer<'a, Handler, Endpoint, Fut>, TransportError> {
+    ) -> Result<CoapServer<'a, Handler, Endpoint>, TransportError> {
         let binding = transport.bind().await?;
         let channel = Box::new(embassy_util::channel::mpmc::Channel::<
             CriticalSectionRawMutex,
@@ -56,7 +54,6 @@ where
             packet_relay_rx: packet_rx,
             packet_relay_tx: packet_tx,
             handler: None,
-            pool: TaskPool::new(),
         })
     }
 
@@ -64,10 +61,10 @@ where
     /// encounters unrecoverable issues, typically due to programmer error in this crate itself
     /// or transport errors not related to a specific peer.  The intention is that this crate
     /// should be highly reliable and run indefinitely for properly configured use cases.
-    pub async fn serve(
+    pub async fn serve<R: Rng + Send + Clone>(
         mut self,
-        handler: impl IntoHandler<Handler, Endpoint>,
-        rng: Box<dyn RngCore>,
+        handler: impl IntoHandler<Handler, Endpoint, R>,
+        rng: R,
     ) -> Result<(), FatalServerError> {
         let mtu = self.binding.get_ref().mtu();
         self.handler = Some(handler.into_handler(mtu, rng));
@@ -77,13 +74,13 @@ where
             match embassy_util::select(self.binding.select_next_some(), self.packet_relay_rx.recv())
                 .await
             {
-                Either::First(event) => self.handle_rx_event(event, spawner)?,
+                Either::First(event) => self.handle_rx_event(event, spawner).await?,
                 Either::Second(item) => self.handle_packet_relay(item).await,
             }
         }
     }
 
-    fn handle_rx_event(
+    async fn handle_rx_event(
         &self,
         result: Result<FramedItem<Endpoint>, FramedReadError<Endpoint>>,
         spawner: Spawner,
@@ -91,7 +88,7 @@ where
         match result {
             Ok((packet, peer)) => {
                 trace!("Incoming packet from {peer:?}: {packet:?}");
-                self.do_handle_request(packet, peer, spawner)?
+                self.do_handle_request(packet, peer, spawner).await?
             }
             Err((transport_err, peer)) => {
                 warn!("Error from {peer:?}: {transport_err}");
@@ -104,11 +101,11 @@ where
         Ok(())
     }
 
-    fn do_handle_request(
+    async fn do_handle_request(
         &self,
         packet: Packet,
         peer: Endpoint,
-        spawner: Spawner,
+        _spawner: Spawner,
     ) -> Result<(), FatalServerError> {
         let handler = self
             .handler
@@ -120,8 +117,9 @@ where
             packet,
             peer,
         );
-        //spawner.must_spawn(reply_task(Box::pin(reply_stream)));
-        self.pool.spawn(move || reply_stream);
+        // FIXME: should spawn the task onto executor but embassy can spawn only
+        // static futures.
+        reply_stream.await;
         Ok(())
     }
 
