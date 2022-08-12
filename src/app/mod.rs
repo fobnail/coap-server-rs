@@ -26,6 +26,7 @@ mod observe_handler;
 #[cfg(feature = "observable")]
 mod observers;
 mod path_matcher;
+pub mod ping_handler;
 pub mod request;
 pub mod request_handler;
 mod request_type_key;

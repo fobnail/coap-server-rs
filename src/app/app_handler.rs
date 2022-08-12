@@ -28,6 +28,8 @@ use crate::app::retransmission_manager::{RetransmissionManager, TransmissionPara
 use crate::app::Request;
 use crate::packet_handler::PacketHandler;
 
+use super::ping_handler::PingHandler;
+
 const DEFAULT_DISCOVERABLE: bool = true;
 pub(crate) const DEFAULT_BLOCK_TRANSFER: bool = true;
 
@@ -51,6 +53,7 @@ pub struct AppHandler<Endpoint: Debug + Clone + Ord + Eq + Hash, R: Clone> {
     /// matching.  See [`PathMatcher`] for more.
     handlers_by_path: Arc<PathMatcher<ResourceHandler<Endpoint>>>,
     rng: R,
+    ping_handler: Option<Arc<dyn PingHandler<Endpoint> + Send + Sync + 'static>>,
 }
 
 impl<Endpoint: Debug + Clone + Ord + Eq + Hash, R: Clone> Clone for AppHandler<Endpoint, R> {
@@ -60,6 +63,7 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash, R: Clone> Clone for AppHandler<E
             error_block_handler: self.error_block_handler.clone(),
             handlers_by_path: self.handlers_by_path.clone(),
             rng: self.rng.clone(),
+            ping_handler: self.ping_handler.clone(),
         }
     }
 }
@@ -119,7 +123,7 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static, R: Rng + Send +
 impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static, R: Rng + Clone>
     AppHandler<Endpoint, R>
 {
-    pub fn from_builder(builder: AppBuilder<Endpoint>, mtu: Option<u32>, mut rng: R) -> Self {
+    pub fn from_builder(mut builder: AppBuilder<Endpoint>, mtu: Option<u32>, mut rng: R) -> Self {
         let retransmission_manager = Arc::new(Mutex::new(RetransmissionManager::new(
             TransmissionParameters::default(),
             &mut rng,
@@ -150,12 +154,14 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static, R: Rng + Clone>
         }
 
         let handlers_by_path = Arc::new(PathMatcher::from_path_strings(handlers));
+        let ping_handler = builder.config.ping_handler.take();
 
         Self {
             retransmission_manager,
             error_block_handler,
             handlers_by_path,
             rng,
+            ping_handler,
         }
     }
 
@@ -188,6 +194,9 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static, R: Rng + Clone>
                     MessageType::Confirmable => {
                         // A common way in CoAP to trigger a cheap "ping" to make sure
                         // the server is alive.
+                        if let Some(handler) = &self.ping_handler {
+                            let _ = handler.handle(peer);
+                        }
                         vec![new_pong_message(&packet)]
                     }
                     MessageType::NonConfirmable => {

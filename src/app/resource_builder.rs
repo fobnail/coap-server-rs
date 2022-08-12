@@ -26,7 +26,7 @@ use crate::app::{observable_resource::ObservableResource, observe_handler::Obser
 /// Configure a specific resource handler, potentially with distinct per-method handlers.
 pub struct ResourceBuilder<Endpoint: Ord + Clone> {
     path: String,
-    config: ConfigBuilder,
+    config: ConfigBuilder<Endpoint>,
     attributes: CoreLink,
     handlers: HashMap<RequestTypeKey, Box<dyn RequestHandler<Endpoint> + Send + Sync>>,
     #[cfg(feature = "observable")]

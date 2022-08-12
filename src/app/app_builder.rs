@@ -1,6 +1,7 @@
 use core::fmt::Debug;
 use core::hash::Hash;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use rand::Rng;
 
@@ -8,16 +9,38 @@ use crate::app::app_handler::AppHandler;
 use crate::app::ResourceBuilder;
 use crate::packet_handler::IntoHandler;
 
+use super::ping_handler::PingHandler;
+
 /// Main builder API to configure how the CoAP server should respond to requests
 pub struct AppBuilder<Endpoint: Ord + Clone> {
-    pub(crate) config: ConfigBuilder,
+    pub(crate) config: ConfigBuilder<Endpoint>,
     pub(crate) resources: Vec<ResourceBuilder<Endpoint>>,
 }
 
-#[derive(Debug, Default, Clone)]
-pub(crate) struct ConfigBuilder {
+#[derive(Clone)]
+pub(crate) struct ConfigBuilder<Endpoint> {
     pub discoverable: Option<bool>,
     pub block_transfer: Option<bool>,
+    pub ping_handler: Option<Arc<dyn PingHandler<Endpoint> + Send + Sync + 'static>>,
+}
+
+impl<Endpoint> Debug for ConfigBuilder<Endpoint> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ConfigBuilder")
+            .field("discoverable", &self.discoverable)
+            .field("block_transfer", &self.block_transfer)
+            .finish()
+    }
+}
+
+impl<Endpoint> Default for ConfigBuilder<Endpoint> {
+    fn default() -> Self {
+        Self {
+            discoverable: Default::default(),
+            block_transfer: Default::default(),
+            ping_handler: Default::default(),
+        }
+    }
 }
 
 impl<Endpoint: Ord + Clone> Default for AppBuilder<Endpoint> {
@@ -32,6 +55,19 @@ impl<Endpoint: Ord + Clone> Default for AppBuilder<Endpoint> {
 impl<Endpoint: Ord + Clone> AppBuilder<Endpoint> {
     pub fn new() -> Self {
         Default::default()
+    }
+
+    pub fn no_ping_handler(mut self) -> Self {
+        self.config.ping_handler = None;
+        self
+    }
+
+    pub fn ping_handler(
+        mut self,
+        handler: impl PingHandler<Endpoint> + Send + Sync + 'static,
+    ) -> Self {
+        self.config.ping_handler = Some(Arc::new(handler));
+        self
     }
 
     /// Enable resource discovery by default for all resources in the app.  To disable this
