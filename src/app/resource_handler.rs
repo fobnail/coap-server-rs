@@ -171,21 +171,25 @@ impl<Endpoint: Debug + Clone + Eq + Hash + Ord + Send + 'static> ResourceHandler
         &self,
         handler: &Box<dyn RequestHandler<Endpoint> + Send + Sync>,
         out: &mut Vec<Packet>,
-        wrapped_request: Request<Endpoint>,
+        mut wrapped_request: Request<Endpoint>,
         _rng: &mut R,
     ) -> Result<(), CoapError> {
-        let mut initial_pair = wrapped_request.original.clone();
-        if !self.maybe_handle_block_request(&mut initial_pair).await? {
-            let fut = {
-                self.generate_and_assign_response(
-                    handler,
-                    &mut initial_pair,
-                    wrapped_request.clone(),
-                )
-            };
+        if !self
+            .maybe_handle_block_request(&mut wrapped_request.original)
+            .await?
+        {
+            let fut = self.generate_and_assign_response(handler, &mut wrapped_request);
             fut.await?
         }
-        out.push(initial_pair.response.as_ref().unwrap().message.clone());
+        out.push(
+            wrapped_request
+                .original
+                .response
+                .as_ref()
+                .unwrap()
+                .message
+                .clone(),
+        );
 
         Ok(())
     }
@@ -193,13 +197,14 @@ impl<Endpoint: Debug + Clone + Eq + Hash + Ord + Send + 'static> ResourceHandler
     async fn generate_and_assign_response(
         &self,
         handler: &Box<dyn RequestHandler<Endpoint> + Send + Sync>,
-        current_pair: &mut CoapRequest<Endpoint>,
-        wrapped_request: Request<Endpoint>,
+        wrapped_request: &mut Request<Endpoint>,
     ) -> Result<(), CoapError> {
         let wrapped_request_once = wrapped_request.clone();
         let response = handler.handle(wrapped_request_once).await?;
-        current_pair.response = Some(response);
-        let _ = self.maybe_handle_block_response(current_pair).await?;
+        wrapped_request.original.response = Some(response);
+        let _ = self
+            .maybe_handle_block_response(&mut wrapped_request.original)
+            .await?;
         Ok(())
     }
 
