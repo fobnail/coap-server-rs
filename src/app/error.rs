@@ -31,6 +31,10 @@ impl CoapError {
         Self::for_code(ResponseType::MethodNotAllowed, "Method not allowed")
     }
 
+    pub fn forbidden() -> Self {
+        Self::for_code(ResponseType::Forbidden, "Forbidden")
+    }
+
     pub fn for_code(code: ResponseType, msg: impl ToString) -> Self {
         Self {
             code: Some(code),
