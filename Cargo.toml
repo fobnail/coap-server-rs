@@ -37,7 +37,7 @@ hashbrown = "0.12"
 embassy-executor = { path = "../embassy/embassy-executor", default-features = false, optional = true }
 embassy-net = { path = "../embassy/embassy-net", default-features = false, optional = true }
 oneshot = { version = "0.1", default-features = false, features = ["async"], optional = true }
-watch = { path = "../watch", default-features = false, optional = true }
+watch = { git = "https://github.com/fobnail/watch", default-features = false, optional = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
 embassy-util = { path = "../embassy/embassy-util", default-features = false, optional = true }
