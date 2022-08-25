@@ -195,7 +195,7 @@ impl<Endpoint: Debug + Clone + Ord + Eq + Hash + Send + 'static, R: Rng + Clone>
                         // A common way in CoAP to trigger a cheap "ping" to make sure
                         // the server is alive.
                         if let Some(handler) = &self.ping_handler {
-                            let _ = handler.handle(peer);
+                            let _ = handler.handle(peer).await;
                         }
                         vec![new_pong_message(&packet)]
                     }

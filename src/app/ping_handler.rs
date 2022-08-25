@@ -1,16 +1,23 @@
+use alloc::boxed::Box;
+use async_trait::async_trait;
 use dyn_clone::DynClone;
+use futures::Future;
 
+#[async_trait]
 pub trait PingHandler<Endpoint>: DynClone + 'static {
-    fn handle(&self, endpoint: Endpoint);
+    async fn handle(&self, endpoint: Endpoint);
 }
 
 dyn_clone::clone_trait_object!(<Endpoint> PingHandler<Endpoint>);
 
-impl<Endpoint, F> PingHandler<Endpoint> for F
+#[async_trait]
+impl<Endpoint, F, R> PingHandler<Endpoint> for F
 where
-    F: Fn(Endpoint) + Sync + Send + Clone + 'static,
+    Endpoint: Send + Sync + 'static,
+    F: Fn(Endpoint) -> R + Sync + Send + Clone + 'static,
+    R: Future<Output = ()> + Send,
 {
-    fn handle(&self, endpoint: Endpoint) {
-        (self)(endpoint)
+    async fn handle(&self, endpoint: Endpoint) {
+        (self)(endpoint).await
     }
 }
